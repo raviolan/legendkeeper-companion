@@ -1,0 +1,55 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.wrangler/
+worker-configuration.d.ts
+
+# Explicit production secret input for atomic deployment.
+.secrets.production.json
+
+# Local secret variants/backups; only the blank production example is public.
+.secrets.*
+!.secrets.production.example.json
+.envrc
+.npmrc
+.netrc
+.aws/
+.ssh/
+.codex/
+credentials.json
+credentials.*.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Build, test, package-manager and editor output.
+dist/
+build/
+coverage/
+.nyc_output/
+.cache/
+.npm/
+*.tsbuildinfo
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Browser/network captures and local data exports can contain tokens or lore.
+*.har
+*.sqlite
+*.sqlite3
+*.db
+private/
+campaign-exports/

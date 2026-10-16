@@ -1,0 +1,11 @@
+# Copy to .dev.vars and fill in locally. Never commit .dev.vars.
+MCP_BASE_URL=http://localhost:8787
+# Exact browser origin; a comma-separated list is supported if both are used.
+MCP_CORS_ORIGIN=http://localhost:6274
+ALLOWED_GITHUB_USER_ID=REPLACE_WITH_NUMERIC_GITHUB_USER_ID
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+LEGENDKEEPER_API_KEY=
+
+# Optional localhost-only sanitized read diagnostics; never enable for production.
+MCP_DEV_DIAGNOSTICS=false

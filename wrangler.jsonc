@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "legendkeeper-companion",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-14",
+  "compatibility_flags": [
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "a858b39aa774402da43914765010c59a"
+    }
+  ],
+  "vars": {
+    "MCP_BASE_URL": "https://legendkeeper-companion.pink-void.workers.dev",
+    "ALLOWED_GITHUB_USER_ID": "180304956",
+    "MCP_DEV_DIAGNOSTICS": "false"
+  },
+  "secrets": {
+    "required": [
+      "GITHUB_CLIENT_ID",
+      "GITHUB_CLIENT_SECRET",
+      "LEGENDKEEPER_API_KEY"
+    ]
+  }
+}

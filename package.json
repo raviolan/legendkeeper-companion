@@ -1,0 +1,35 @@
+{
+  "name": "legendkeeper-mcp",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.mjs",
+    "inspector": "npx --yes @modelcontextprotocol/inspector node --env-file-if-exists=.env server.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "wrangler types && tsc --noEmit",
+    "test": "node --test",
+    "inspector:remote": "npx --yes @modelcontextprotocol/inspector@2.11.0"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.3",
+    "@legendkeeper/sdk": "^4.1.0",
+    "@modelcontextprotocol/server": "^2.3.1",
+    "agents": "^0.28.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "esbuild": "0.28.2",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.149.0"
+  }
+}
