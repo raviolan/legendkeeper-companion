@@ -1,11 +1,13 @@
+import { registerWriteTools } from './legendkeeper-writes.mjs';
 import * as z from 'zod/v4';
 
 /**
  * @param {import('@modelcontextprotocol/server').McpServer} server
  * @param {import('@legendkeeper/sdk').LegendKeeper} lk
- * @param {{ onReadError?: (tool: string, error: unknown, details?: { operation: string }) => void }} [options]
+ * @param {{ canWrite?: boolean, onReadError?: (tool: string, error: unknown, details?: { operation: string }) => void }} [options]
  */
 export function registerLegendKeeperTools(server, lk, options = {}) {
+  registerWriteTools(server, lk, options);
   server.registerTool('search_campaign', {
     title: 'Search campaign',
     description: 'Search LegendKeeper campaign lore, NPCs, locations and notes.',

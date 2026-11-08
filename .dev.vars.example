@@ -5,7 +5,18 @@ MCP_CORS_ORIGIN=http://localhost:6274
 ALLOWED_GITHUB_USER_ID=REPLACE_WITH_NUMERIC_GITHUB_USER_ID
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
+# User A / GitHub only. Never use this as a Google fallback.
 LEGENDKEEPER_API_KEY=
+# User B / Google only. A missing key blocks User B's MCP requests.
+LEGENDKEEPER_API_KEY_HUSBAND=
 
 # Optional localhost-only sanitized read diagnostics; never enable for production.
 MCP_DEV_DIAGNOSTICS=false
+
+# Optional second identity provider; use Cloudflare secrets in production.
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+# Exact verified subject, never email. Leave unset until local verification.
+ALLOWED_GOOGLE_SUB=
+# Only honored on localhost with an unset Google allowlist; grants no access.
+GOOGLE_SUB_DISCOVERY=false

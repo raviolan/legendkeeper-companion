@@ -4,12 +4,13 @@ import { McpServer } from '@modelcontextprotocol/server';
 import { createMcpHandler } from 'agents/mcp/server';
 import { insufficientScope, OAuthProvider } from '@cloudflare/workers-oauth-provider';
 import { registerLegendKeeperTools } from '../src/legendkeeper-tools.mjs';
-import { authorizeMcpContext } from '../src/remote-auth.mjs';
+import { resolveMcpPrincipal } from '../src/remote-auth.mjs';
 import { handleMcpPreflight, isAllowedRequestOrigin, mcpCorsOptions, mcpOriginHostnames } from '../src/remote-origin.mjs';
 import { handleOAuthRequest, type OAuthEnv } from './oauth';
 
 interface Env extends OAuthEnv {
   LEGENDKEEPER_API_KEY: string;
+  LEGENDKEEPER_API_KEY_HUSBAND?: string;
   OAUTH_KV: KVNamespace;
   MCP_CORS_ORIGIN?: string;
   MCP_DEV_DIAGNOSTICS?: string;
@@ -23,7 +24,7 @@ interface AuthContext {
 
 interface ApiContext extends ExecutionContext {
   auth: AuthContext;
-  props: { githubUserId?: string };
+  props: { githubUserId?: string; identity?: string };
 }
 
 export default {
@@ -57,16 +58,27 @@ export default {
 
         // OAuthProvider rejects missing/invalid tokens before this handler.
         // Keep an explicit guard so no future routing change can expose data.
-        const accessDenied = authorizeMcpContext({
+        const principal = resolveMcpPrincipal({
           auth,
           githubUserId: authContext.props?.githubUserId,
+          identity: authContext.props?.identity,
+          allowedGoogleSub: apiEnv.ALLOWED_GOOGLE_SUB,
           allowedGithubUserId: apiEnv.ALLOWED_GITHUB_USER_ID,
           expectedAudience: `${base.origin}/mcp`,
           insufficientScope,
         });
-        if (accessDenied) return accessDenied;
-        const onReadError = developmentReadDiagnostics(apiEnv, base.hostname);
-        if (!apiEnv.LEGENDKEEPER_API_KEY) {
+        if (principal instanceof Response) return principal;
+        // Only the fully authorized SDK principal selects a secret. Never use
+        // tool arguments, resource IDs, query parameters, or request headers.
+        // No fallback: a missing key disables only its assigned identity.
+        const apiKey = principal === 'github' ? apiEnv.LEGENDKEEPER_API_KEY
+          : principal === 'google' ? apiEnv.LEGENDKEEPER_API_KEY_HUSBAND : undefined;
+        // Diagnostics describe only this request's selected binding; do not
+        // mutate env or report the other user's credential configuration.
+        const onReadError = developmentReadDiagnostics({
+          MCP_DEV_DIAGNOSTICS: apiEnv.MCP_DEV_DIAGNOSTICS, LEGENDKEEPER_API_KEY: apiKey,
+        }, base.hostname);
+        if (!apiKey) {
           onReadError('configuration', new Error());
           return Response.json({ error: 'Service configuration unavailable' }, { status: 503, headers: { 'Cache-Control': 'no-store' } });
         }
@@ -74,11 +86,12 @@ export default {
         const server = createMcpHandler(() => {
           const mcp = new McpServer({ name: 'legendkeeper-companion', version: '1.0.0' });
           const lk = new LegendKeeper({
-            apiKey: apiEnv.LEGENDKEEPER_API_KEY,
+            apiKey,
+            maxRetries: 0,
             // SDK 4.1 calls config.fetch(...); preserve the Worker global receiver.
             fetch: (input, init) => globalThis.fetch(input, init),
           });
-          registerLegendKeeperTools(mcp, lk, { onReadError });
+          registerLegendKeeperTools(mcp, lk, { onReadError, canWrite: auth.scope.includes('mcp:write') });
           return mcp;
         }, {
           route: '/mcp',
@@ -109,7 +122,7 @@ export default {
       authorizeEndpoint: '/authorize',
       tokenEndpoint: '/oauth/token',
       clientRegistrationEndpoint: '/register',
-      scopesSupported: ['mcp:read', 'offline_access'],
+      scopesSupported: ['mcp:read', 'mcp:write', 'offline_access'],
       resourceMetadata: {
         resource: `${base.origin}/mcp`,
         authorization_servers: [base.origin],

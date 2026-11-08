@@ -18,10 +18,10 @@ function payload(result) {
   return JSON.parse(result.content[0].text);
 }
 
-test('registers only the three read-only campaign tools', () => {
+test('registers read and write campaign tools', () => {
   const tools = setup({});
-  assert.deepEqual([...tools.keys()], ['search_campaign', 'list_pages', 'read_page']);
-  for (const { config } of tools.values()) assert.equal(config.annotations.readOnlyHint, true);
+  assert.equal(tools.size, 9);
+  for (const name of ['search_campaign', 'list_pages', 'read_page', 'read_document_blocks']) assert.equal(tools.get(name).config.annotations.readOnlyHint, true);
 });
 
 test('search_campaign returns useful hit metadata and pagination', async () => {

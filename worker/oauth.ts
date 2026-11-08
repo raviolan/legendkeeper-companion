@@ -4,8 +4,13 @@ import {
   type ConsentDescription,
   type OAuthHelpers,
 } from '@cloudflare/workers-oauth-provider';
+import { exchangeGoogleIdentity, googleConfigured, validGoogleSub } from './google';
 
 export interface OAuthEnv {
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
+  ALLOWED_GOOGLE_SUB?: string;
+  GOOGLE_SUB_DISCOVERY?: string;
   GITHUB_CLIENT_ID: string;
   GITHUB_CLIENT_SECRET: string;
   ALLOWED_GITHUB_USER_ID: string;
@@ -15,9 +20,11 @@ export interface OAuthEnv {
 
 interface UpstreamState {
   verifier: string;
+  provider?: 'github' | 'google';
+  nonce?: string;
 }
 
-const GRANTABLE_SCOPES = new Set(['mcp:read', 'offline_access']);
+const GRANTABLE_SCOPES = new Set(['mcp:read', 'mcp:write', 'offline_access']);
 const GITHUB_AUTHORIZE_URL = 'https://github.com/login/oauth/authorize';
 
 export async function handleOAuthRequest(request: Request, env: OAuthEnv): Promise<Response> {
@@ -28,6 +35,11 @@ export async function handleOAuthRequest(request: Request, env: OAuthEnv): Promi
       if (request.method === 'GET') return await showConsent(request, env);
       if (request.method === 'POST') return await submitConsent(request, env);
       return methodNotAllowed('GET, POST');
+    }
+
+    if (url.pathname === '/callback/google') {
+      if (request.method !== 'GET') return methodNotAllowed('GET');
+      return await finishGoogleLogin(request, env);
     }
 
     if (url.pathname === '/callback') {
@@ -58,7 +70,7 @@ async function showConsent(request: Request, env: OAuthEnv): Promise<Response> {
   const consent = await oauth.beginConsent(authorization);
   consent.headers.set('Content-Type', 'text/html; charset=utf-8');
   applyConsentSecurityHeaders(consent.headers);
-  return new Response(renderConsent(details, consent.handle), { headers: consent.headers });
+  return new Response(renderConsent(details, consent.handle, googleConfigured(env)), { headers: consent.headers });
 }
 
 async function submitConsent(request: Request, env: OAuthEnv): Promise<Response> {
@@ -79,12 +91,30 @@ async function submitConsent(request: Request, env: OAuthEnv): Promise<Response>
     return new Response(null, { status: 302, headers: denied.headers });
   }
 
+  const provider = String(form.get('provider') ?? 'github');
+  if (provider !== 'github' && provider !== 'google') return page('Unknown identity provider.', 400);
+  if (provider === 'google' && !googleConfigured(env)) return page('Google sign-in is not configured.', 503);
+
   const approved = await oauth.approveConsent(request, handle, { scope: selected });
   const verifier = randomVerifier();
+  const nonce = provider === 'google' ? randomVerifier() : undefined;
   const upstream = await oauth.beginUpstream(approved.request, {
-    data: { verifier },
+    data: { verifier, provider, nonce },
     headers: approved.headers,
   });
+
+  if (provider === 'google') {
+    const google = new URL('https://accounts.google.com/o/oauth2/v2/auth');
+    google.search = new URLSearchParams({
+      client_id: env.GOOGLE_CLIENT_ID!,
+      redirect_uri: `${canonicalBase(env.MCP_BASE_URL)}/callback/google`,
+      response_type: 'code', scope: 'openid', prompt: 'select_account',
+      state: upstream.state, nonce: nonce!,
+      code_challenge: await s256(verifier), code_challenge_method: 'S256',
+    }).toString();
+    upstream.headers.set('Location', google.toString());
+    return new Response(null, { status: 302, headers: upstream.headers });
+  }
 
   const callback = `${canonicalBase(env.MCP_BASE_URL)}/callback`;
   const github = new URL(GITHUB_AUTHORIZE_URL);
@@ -103,6 +133,8 @@ async function submitConsent(request: Request, env: OAuthEnv): Promise<Response>
 async function finishGithubLogin(request: Request, env: OAuthEnv): Promise<Response> {
   const oauth = env.OAUTH_PROVIDER;
   const upstream = await oauth.finishUpstream<UpstreamState>(request);
+  // Absent provider is accepted only for pre-upgrade GitHub transactions.
+  if (upstream.data.provider && upstream.data.provider !== 'github') return page('Invalid identity provider callback.', 400);
   const callbackUrl = new URL(request.url);
 
   if (callbackUrl.searchParams.has('error')) {
@@ -127,10 +159,52 @@ async function finishGithubLogin(request: Request, env: OAuthEnv): Promise<Respo
     userId: githubUserId,
     metadata: {},
     scope: upstream.request.scope.filter((scope) => GRANTABLE_SCOPES.has(scope)),
-    props: { githubUserId },
+    props: { githubUserId, identity: `github:${githubUserId}` },
   });
   upstream.headers.set('Location', completed.redirectTo);
   return new Response(null, { status: 302, headers: upstream.headers });
+}
+
+async function finishGoogleLogin(request: Request, env: OAuthEnv): Promise<Response> {
+  const oauth = env.OAUTH_PROVIDER;
+  const upstream = await oauth.finishUpstream<UpstreamState>(request);
+  if (upstream.data.provider !== 'google' || !upstream.data.nonce || !googleConfigured(env)) {
+    return page('Invalid identity provider callback.', 400);
+  }
+  const url = new URL(request.url);
+  const code = url.searchParams.get('code');
+  let sub: string | null = null;
+  if (code && !url.searchParams.has('error')) {
+    // Never log tokens, claims, authorization codes, or upstream error bodies.
+    try { sub = await exchangeGoogleIdentity(code, upstream.data.verifier, upstream.data.nonce, env); }
+    catch { /* Fail closed; return the validated client's access_denied redirect. */ }
+  }
+  // Local-only bootstrap: display the verified subject, without issuing any grant.
+  // Requires an explicit local flag and an unset allowlist; never active in production.
+  if (sub && isLocalDiscovery(env)) {
+    const response = page(`Verified Google sub: ${sub}. No MCP access was granted. Set ALLOWED_GOOGLE_SUB to this exact value and disable GOOGLE_SUB_DISCOVERY.`, 200);
+    for (const cookie of upstream.headers.getSetCookie()) response.headers.append('Set-Cookie', cookie);
+    return response;
+  }
+  if (!sub || !validGoogleSub(env.ALLOWED_GOOGLE_SUB) || sub !== env.ALLOWED_GOOGLE_SUB) {
+    upstream.headers.set('Location', authorizationErrorRedirect(upstream.request, 'access_denied'));
+    return new Response(null, { status: 302, headers: upstream.headers });
+  }
+  const identity = `google:${sub}`;
+  const completed = await oauth.completeAuthorization({
+    // The SDK forbids colons in userId; the encrypted identity prop uses google:sub.
+    request: upstream.request, userId: `google/${encodeURIComponent(sub)}`, metadata: {},
+    scope: upstream.request.scope.filter(scope => GRANTABLE_SCOPES.has(scope)),
+    props: { identity },
+  });
+  upstream.headers.set('Location', completed.redirectTo);
+  return new Response(null, { status: 302, headers: upstream.headers });
+}
+
+function isLocalDiscovery(env: OAuthEnv): boolean {
+  const host = new URL(canonicalBase(env.MCP_BASE_URL)).hostname;
+  return ['localhost', '127.0.0.1', '[::1]'].includes(host)
+    && env.GOOGLE_SUB_DISCOVERY === 'true' && !env.ALLOWED_GOOGLE_SUB;
 }
 
 async function exchangeAndIdentify(code: string, verifier: string, env: OAuthEnv): Promise<string | null> {
@@ -176,7 +250,7 @@ async function exchangeAndIdentify(code: string, verifier: string, env: OAuthEnv
   return String(userData.id);
 }
 
-function renderConsent(details: ConsentDescription, handle: string): string {
+function renderConsent(details: ConsentDescription, handle: string, googleEnabled: boolean): string {
   const name = escapeHtml(details.clientName);
   const redirectHost = escapeHtml(details.redirectHost);
   const clientIdentity = details.clientDomain
@@ -189,7 +263,7 @@ function renderConsent(details: ConsentDescription, handle: string): string {
     .filter((scope) => GRANTABLE_SCOPES.has(scope));
   const scopeRows = availableScopes.map((scope) => {
     const checked = scope === 'mcp:read' ? ' checked required' : '';
-    return `<label><input type="checkbox" name="scope" value="${escapeHtml(scope)}"${checked}> ${escapeHtml(scope)}${scope === 'mcp:read' ? ' (required)' : ''}</label>`;
+    return `<label><input type="checkbox" name="scope" value="${escapeHtml(scope)}"${checked}> ${escapeHtml(scope)} — ${scope === 'mcp:write' ? 'Create pages and edit or replace content and metadata' : scope === 'mcp:read' ? 'Search and read campaign content' : 'Maintain access using refresh tokens'}${scope === 'mcp:read' ? ' (required)' : ''}</label>`;
   }).join('<br>');
 
   return `<!doctype html>
@@ -197,12 +271,13 @@ function renderConsent(details: ConsentDescription, handle: string): string {
 <title>Authorize ${name}</title>
 <main><h1>Allow ${name} to access LegendKeeper?</h1>
 <p>${clientIdentity}</p>
-<p>The MCP client will receive access to the read-only LegendKeeper tools. Its redirect destination is <strong>${redirectHost}</strong>.</p>
+<p>The MCP client will receive access to LegendKeeper tools with the permissions selected below. Its redirect destination is <strong>${redirectHost}</strong>.</p>
 ${loopbackWarning}
-<p>GitHub will verify that you are the allowed account. The GitHub token is used only to check your account identity.</p>
+<p>Your selected provider will verify your account. Only the configured accounts can access the tools.</p>
 <form method="post" action="/authorize">
 <input type="hidden" name="handle" value="${escapeHtml(handle)}">
 ${scopeRows}
+<p><label>Sign in with <select name="provider"><option value="github">GitHub</option>${googleEnabled ? '<option value="google">Google</option>' : ''}</select></label></p>
 <p><button type="submit" name="decision" value="approve">Allow</button>
 <button type="submit" name="decision" value="deny" formnovalidate>Deny</button></p>
 </form></main></html>`;

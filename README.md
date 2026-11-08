@@ -1,6 +1,6 @@
 # LegendKeeper Companion MCP
 
-A private, read-only MCP server for one LegendKeeper account. It keeps the local STDIO integration and adds an OAuth-protected Cloudflare Worker endpoint at `/mcp`.
+A private, read-only MCP server with isolated LegendKeeper credentials for two authorized people. GitHub uses your existing account key; optional Google sign-in uses a separate key for your husband. It keeps the local STDIO integration and adds an OAuth-protected Cloudflare Worker endpoint at `/mcp`.
 
 The remote Worker uses Cloudflare's `OAuthProvider` 1.x in a combined authorization-server/resource-server deployment. GitHub authenticates the human user; only the configured numeric GitHub user ID is allowed. The Worker uses a separate LegendKeeper API key for upstream reads. The ChatGPT access token is never sent to LegendKeeper.
 
@@ -117,7 +117,7 @@ These are manual steps for after you have reviewed the implementation. No Cloudf
    open -e .secrets.production.json
    ```
 
-   Fill the three empty JSON values in the editor and save. Do not use `.dev.vars` or `.env` as the production secret input: those contain local settings and possibly local OAuth credentials. The production input file is Git-ignored. Never paste secret values into commands, chat, or source code.
+   For GitHub-only deployment, fill the three existing GitHub/LegendKeeper values and omit the optional `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `LEGENDKEEPER_API_KEY_HUSBAND` entries. For two-user deployment, fill all six entries with the matching production credentials; never upload empty placeholder values. Do not use `.dev.vars` or `.env` as the production secret input: those contain local settings and possibly local OAuth credentials. The production input file is Git-ignored. Never paste secret values into commands, chat, or source code.
 
    When explicitly ready to publish, run:
 
@@ -125,7 +125,7 @@ These are manual steps for after you have reviewed the implementation. No Cloudf
    npx wrangler deploy --config wrangler.jsonc --env="" --secrets-file .secrets.production.json
    ```
 
-   This command **publishes** the Worker and configures its secrets. It uses the top-level production configuration, including the existing `OAUTH_KV` namespace. The `secrets.required` list guards against missing secret names. Local `.dev.vars`/`.env` values are development inputs, not deployed runtime bindings. `ALLOWED_GITHUB_USER_ID` and `MCP_BASE_URL` are ordinary configuration. Remove the production secret input after a successful deployment or keep it only in approved private storage.
+   This command **publishes** the Worker and configures its secrets. It uses the top-level production configuration, including the existing `OAUTH_KV` namespace. The unchanged `secrets.required` list guards the existing GitHub-only configuration. Google additionally needs `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `LEGENDKEEPER_API_KEY_HUSBAND`; these optional names are in the template, and runtime authorization fails closed if the selected identity’s key is absent. Local `.dev.vars`/`.env` values are development inputs, not deployed runtime bindings. `ALLOWED_GITHUB_USER_ID` and `MCP_BASE_URL` are ordinary configuration. Remove the production secret input after a successful deployment or keep it only in approved private storage.
 
 7. Check OAuth and MCP after secrets are present:
 
@@ -143,11 +143,11 @@ These are manual steps for after you have reviewed the implementation. No Cloudf
 - Replace a Cloudflare secret with `npx wrangler secret put SECRET_NAME`; use the interactive prompt. Replacing `LEGENDKEEPER_API_KEY` requires a valid new LegendKeeper key. Replacing the GitHub client secret requires updating the corresponding GitHub OAuth App secret first.
 - Revoke OAuth grants/tokens through the revocation endpoint advertised in the authorization-server metadata (the provider implements revocation alongside its configured token endpoint), or delete the associated OAuth KV data if you intentionally want to invalidate every grant. Do not delete the KV namespace casually; it contains active authorization state.
 - To revoke the upstream GitHub app, remove it from your GitHub account's **Settings → Applications → Authorized OAuth Apps** and/or delete the OAuth App. That prevents future identity checks; also revoke server-issued grants if they should stop working immediately.
-- Rotate/revoke the LegendKeeper API key in LegendKeeper, then replace the Cloudflare `LEGENDKEEPER_API_KEY` secret.
+- Rotate/revoke each LegendKeeper API key in its own account, then replace only its matching Cloudflare secret: `LEGENDKEEPER_API_KEY` for GitHub or `LEGENDKEEPER_API_KEY_HUSBAND` for Google.
 
 ## Security and tool surface
 
-The remote server exposes exactly `search_campaign`, `list_pages`, and `read_page`. All are marked read-only. OAuth uses authorization code with PKCE, the provider's browser-bound consent helpers, a GitHub OAuth identity check, and a numeric user-ID allowlist. The API handler checks the validated token audience, allowlisted user, and `mcp:read` scope for each MCP request. The MCP route is unavailable without a valid OAuth access token. No write, update, or delete tools are registered.
+The remote server exposes exactly `search_campaign`, `list_pages`, and `read_page`. All are marked read-only. OAuth uses authorization code with PKCE, the provider's browser-bound consent helpers, a GitHub numeric-ID allowlist or Google OIDC verified-sub allowlist. Each authorized identity is bound to its own LegendKeeper key, with no credential fallback. The API handler checks the validated token audience, allowlisted user, and `mcp:read` scope for each MCP request. The MCP route is unavailable without a valid OAuth access token. No write, update, or delete tools are registered.
 
 ## MCP protocol compatibility
 
@@ -163,7 +163,7 @@ The Worker passes a fetch wrapper to SDK 4.1.0 so the SDK's `config.fetch(...)` 
 
 For safe diagnostics, add `MCP_DEV_DIAGNOSTICS=true` to your private `.dev.vars`, stop Wrangler with Ctrl-C, then run `npm run dev`. In a second terminal run `npm run inspector:remote`, reconnect through OAuth, and call `list_pages` with `{"limit":1}`. Confirm it returns actual pages. Diagnostics only activate on localhost origins and require this explicit flag; production-facing tool errors stay generic. They report an allowlisted error type, cause type, HTTP status, a synthesized message, and a boolean indicating whether the API key binding exists. They never log raw SDK error messages, bodies, URLs, keys, or campaign content.
 
-If a call still fails, share only the JSON line whose `event` is `legendkeeper_read_error`. HTTP 401 suggests an invalid/revoked LegendKeeper key; 403 suggests access restrictions; a connection error without a status suggests runtime/network/TLS/timeout failure; a project-resolution diagnostic means the SDK could not find exactly one project for the key. Keep the working LegendKeeper key in `.dev.vars` as `LEGENDKEEPER_API_KEY` (STDIO loads `.env` separately). Disable diagnostics again with `MCP_DEV_DIAGNOSTICS=false`.
+If a call still fails, share only the JSON line whose `event` is `legendkeeper_read_error`. HTTP 401 suggests an invalid/revoked LegendKeeper key; 403 suggests access restrictions; a connection error without a status suggests runtime/network/TLS/timeout failure; a project-resolution diagnostic means the SDK could not find exactly one project for the key. Keep your GitHub account’s key in `.dev.vars` as `LEGENDKEEPER_API_KEY` and your husband’s Google account key as `LEGENDKEEPER_API_KEY_HUSBAND` (STDIO still loads only `LEGENDKEEPER_API_KEY` from `.env`). Diagnostics describe the current request’s selected key binding without logging its value. Disable diagnostics again with `MCP_DEV_DIAGNOSTICS=false`.
 
 ## Production review and remaining verification
 
@@ -242,3 +242,80 @@ node --env-file-if-exists=.env --env-file-if-exists=.dev.vars scripts/check-read
 Replace `RESOURCE_ID` with that character's ID. The probe uses the same read-only handler as STDIO and the Worker. It prints only success, document counts, and whether an Overview exists and has text, plus sanitized error diagnostics if necessary. It does not print IDs, names, private text, keys, or raw responses. Localhost diagnostics now include an allowlisted failing operation (`resources.get`, `documents.list`, or `documents.getBlocks`). Production diagnostics remain disabled. To inspect the actual biography locally, call `read_page` in your authenticated local Inspector; keep its output private.
 
 After reviewing and running the probe, redeploy with `npx wrangler deploy --config wrangler.jsonc --env=""`, then verify `read_page` for that same resource through authenticated ChatGPT. Tests and a successful mock response do not establish production content retrieval.
+
+## Optional second user with Google sign-in
+
+See [Google sign-in setup and verification](GOOGLE_SIGN_IN.md) for the exact Google Cloud client type and callbacks, consent configuration, secrets, verified-sub discovery, compatibility details, and live-check limits. GitHub and the production configuration remain unchanged until a separately approved rollout.
+
+## Two isolated LegendKeeper accounts on the same Worker
+
+The remote endpoint is shared, but credentials and SDK clients are isolated per request:
+
+| Verified OAuth principal | LegendKeeper secret | Accessible content |
+| --- | --- | --- |
+| GitHub ID `180304956` | Existing `LEGENDKEEPER_API_KEY` | Your key’s account/project only |
+| Google `ALLOWED_GOOGLE_SUB` | New `LEGENDKEEPER_API_KEY_HUSBAND` | Your husband’s key’s account/project only |
+
+After Cloudflare validates the bearer token, `resolveMcpPrincipal` checks the token context’s user ID, encrypted identity props, current allowlist, exact `/mcp` audience, and `mcp:read` scope. Only then does the API handler select the matching secret and construct a new LegendKeeper SDK client. The SDK resolves its project using that same key. OAuth tokens hold identity, never LegendKeeper keys. Neither tool arguments, resource IDs, email addresses, request headers, nor query parameters select credentials. A missing assigned key returns HTTP 503 before any LegendKeeper request; the other key is never tried. Legacy GitHub grants continue to work unchanged. No global SDK client, shared project cache, or mutable credential state is introduced.
+
+All three tools (`search_campaign`, `list_pages`, `read_page`) use this request’s SDK instance. Supplying a foreign resource ID still sends the caller’s own key and project to LegendKeeper; a resource outside that key’s permissions is inaccessible. Search terms and pagination cursors cannot change this credential binding. As before, the actual accessible project/content is governed by the permissions of the correctly configured LegendKeeper key. Verify the two secrets belong to the intended separate accounts/projects; the Worker cannot infer an account owner from a secret’s variable name.
+
+The example production secret file now lists all six names with empty placeholders; the real ignored `.secrets.production.json` has not been changed. For the existing live Worker, do not bulk-upload that template or replace the working GitHub key. After local verification and separate approval, add only the three new secrets (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `LEGENDKEEPER_API_KEY_HUSBAND`) using private Cloudflare secret entry, configure `ALLOWED_GOOGLE_SUB`, and review deployment separately. `wrangler.jsonc`, production infrastructure, and live secrets remain unchanged by this implementation.
+
+To verify without sharing campaign data, first run `npm test` and `npm run typecheck`; all automated accounts, keys, IDs, and page contents are synthetic, with no live requests. The suite checks both actual OAuth flows, refresh, all three tools, foreign IDs/cursors, spoofed credential hints, missing credentials, and concurrent users on one Worker/KV store.
+
+For private live verification before deployment, follow [the local two-account procedure](GOOGLE_SIGN_IN.md#test-both-accounts-privately-before-deployment). Keep real keys only in ignored local environment files, keep diagnostic logging disabled, and inspect results only on your own computer. The procedure records pass/fail outcomes rather than exporting campaign responses, names, IDs, browser traces, or tokens. Real Google credentials and both LegendKeeper keys are needed to verify upstream permissions; the automated suite alone cannot establish the ownership of real keys.
+
+## Editing pages (SDK 4.1.0)
+
+The existing `/mcp` endpoint and read tools remain available. Six additional tools are registered. IDs always distinguish a resource (page in the hierarchy) from a document (tab inside that resource). All schemas reject extra fields on the new tools.
+
+| Tool | Inputs | Effect |
+| --- | --- | --- |
+| `read_document_blocks` | `resourceId`, `documentId` | Read full rich block tree, block IDs, text and version. Requires `mcp:read`. |
+| `append_page` | `resourceId`, `documentId`, `expectedVersion`, `content` | Atomically append one hidden-title text container containing new paragraphs. Preserves existing blocks and other tabs. |
+| `edit_page_block` | `resourceId`, `documentId`, `expectedVersion`, `blockId`, `content` | Patch the text runs of exactly one paragraph, heading or quote. Replaces formatting inside its text runs; preserves block kind, children and unrelated content. |
+| `replace_page_content` | `resourceId`, `documentId`, `expectedVersion`, `mode: "replace_entire_document"`, `content` | Destructively replace only this tab with plain-text paragraphs. Requires an explicit user replacement request. Never an append/edit fallback. |
+| `create_page` | `name`; optional `parentId`, `content`, `tags`, `aliases` | Atomically create a resource and one Overview page document with initial content. |
+| `update_resource` | `resourceId`; any of `name`, `tags`, `aliases` | Patch only supplied metadata fields. Tags/aliases replace the respective arrays; `[]` clears them. No moving or deletion. |
+
+IDs are nonempty strings up to 128 characters; versions up to 256. Content is a nonempty plain-text string up to 100,000 characters. Names and aliases are 1–500 characters; tags and aliases have at most 100 entries. Blank-line separators create multiple paragraphs in append, create and replacement. Content is not Markdown or HTML; rich text is read intact but new rich formatting is not exposed in this first implementation. Replacement cannot clear a document to an empty string.
+
+Inspect blocks first and pass the returned version as `expectedVersion`. Before writing, the server retrieves the resource, document type and latest blocks. Stale input fails before mutation; every document mutation also sends `If-Match` to close the read/write race. A 412 means read again, review changes and retry deliberately. Missing/duplicate block IDs and unsupported block kinds fail safely. No automatic ID assignment, whole-document edit fallback, deletion, or moving is exposed. Unsupported blocks remain untouched during append/edit. Full replacement intentionally removes old content and may be refused by upstream protection of hidden/admin-only content.
+
+SDK 4.1.0 supports atomic block insert/update and document replacement, as verified against its installed types, implementation and bundled OpenAPI contract and the [official SDK guide](https://www.legendkeeper.com/developers/guide/). Resource metadata updates have no `If-Match` support: patches preserve omitted fields, but simultaneous changes to the same name/tags/aliases field can overwrite each other. Create plus initial documents is one request; no partial resource creation followed by a content write. SDK retries are disabled in both server entrypoints. On a timeout or unknown failure, inspect the target before retrying to avoid duplicate content/resources. Successful responses include affected IDs and resulting blocks/version or resource metadata; use a fresh inspection to verify persisted content.
+
+### Write authorization and reconnecting
+
+Remote reads still require `mcp:read`. Every write handler additionally requires `mcp:write` from the provider-validated token context; arguments cannot grant it. Identity allowlists, audience validation, per-user secret selection, browser-origin checks and refresh-token handling remain in place. Write tools are visible to read-only clients but execution is denied before SDK access. Mutations carry MCP annotations; content/metadata replacement is marked potentially destructive.
+
+Clients must request `mcp:read mcp:write` (plus `offline_access` for refresh access). The consent screen offers write access only when requested, unchecked by default, and explains that it permits creation, editing and replacement. Read-only consent remains available. Existing read-only tokens and refresh grants do not acquire write access automatically. Reconnect or reauthorize the ChatGPT connector with the write scope; if its existing grant persists, remove/re-add the connection using the same endpoint, then complete fresh consent. A refresh token cannot elevate its original scopes.
+
+Local STDIO stays read-only by default. Explicitly set `LEGENDKEEPER_ENABLE_WRITES=true` in the private `.env` to enable its write handlers. STDIO uses possession of the local API key, not remote OAuth. Never put keys or tokens in prompts, tracked files, command arguments, or shared traces.
+
+### Review and deployment
+
+No production deployment, live secret change or live LegendKeeper write was performed for this upgrade. Preserve the existing Worker configuration, KV and secrets. After review and explicit deployment approval, from the repository root run:
+
+```sh
+npm install
+npm run typecheck
+npm test
+npx wrangler deploy --config wrangler.jsonc --env=""
+```
+
+This updates the existing Worker at `https://legendkeeper-companion.pink-void.workers.dev/mcp`; do not create a second Worker or bulk-upload secret templates. No new secrets are needed for write scopes. Existing uncommitted Google sign-in/account-isolation work is preserved in this workspace and must be reviewed as part of any deployment from this tree.
+
+Connect Inspector using Streamable HTTP, complete fresh OAuth, initialize and list tools: expect nine including the original three. Test a read-only token's write denial, then a write-enabled token in a controlled document. Repeat discovery from ChatGPT after reauthorization; see the [official OpenAI custom MCP guidance](https://developers.openai.com/api/docs/guides/custom-mcp-server). ChatGPT write-tool availability depends on its plan/workspace/client restrictions; local tests and deployment alone do not verify ChatGPT editing. Do not bypass those restrictions.
+
+For authorization failures, check requested/granted scopes, allowlisted identity and exact `/mcp` audience; keep the existing origin policy. A scope denial is different from upstream LegendKeeper permission failure. For SDK failures, check the API key's project and edit permissions privately; member keys may need a writable parent to create pages. Public errors deliberately omit raw upstream bodies and credentials. A conflict requires a fresh read, not blind retries.
+
+### Perrin Quade manual verification (live writes require separate approval)
+
+1. Search for Perrin Quade and confirm resource `ng9bwvqp` in the Memory Market hierarchy. Call `read_page` and confirm Overview `iipp4vpj`, General `fkxt16w5`, At the Market `l1gvpd6a`. Never replace the Overview.
+2. Inspect each document with `read_document_blocks`; privately retain versions and full block trees. These are reads only. Confirm At the Market's current state rather than assuming it is still empty.
+3. Prepare an append to `{ "resourceId": "ng9bwvqp", "documentId": "l1gvpd6a", "expectedVersion": "<fresh inspected version>", "content": "Companion verification marker <unique value>" }`. Obtain explicit approval before executing it, including the cleanup approach below.
+4. After approval, append once, then inspect At the Market again. Confirm exactly one new container with the marker, and unchanged preexisting blocks. Reinspect Overview and General and compare their content to the saved reads. Record only pass/fail outside private local inspection.
+5. Cleanup: delete only the returned appended container in the LegendKeeper UI after confirming its ID/content. No MCP deletion tool is exposed. Do not restore a whole old snapshot, since that could overwrite intervening manual edits. Inspect again to confirm the marker is gone and unrelated content remains. Cleanup is a manual step requiring access to the LegendKeeper editor.
+
+Automated tests use synthetic SDK HTTP responses and in-memory OAuth KV, including the reference resource/document IDs; they never modify this live resource. Live permission checks, production refresh behavior and ChatGPT discovery/execution remain manual verification steps.

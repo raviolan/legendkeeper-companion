@@ -65,7 +65,7 @@ test(`authenticated Inspector initialization and tools/list support 2025-11-25 a
       const initialized = await result(response);
       assert.equal(initialized.result.protocolVersion, '2025-11-25');
       const tools = await result(await rpc({ jsonrpc: '2.0', id: 11, method: 'tools/list', params: {} }, '2025-11-25', origin));
-      assert.equal(tools.result.tools.length, 3);
+      assert.equal(tools.result.tools.length, 9);
     }
     for (const origin of ['https://evil.example', 'http://localhost:6275', 'https://localhost:6274']) {
       const response = await rpc({ jsonrpc: '2.0', id: 12, method: 'tools/list' }, '2025-11-25', origin);
@@ -91,8 +91,8 @@ test(`authenticated Inspector initialization and tools/list support 2025-11-25 a
     assert.equal(initialized.result.protocolVersion, '2025-11-25');
     assert.equal((await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' })).status, 202);
     const listed = await result(await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }));
-    assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), ['list_pages', 'read_page', 'search_campaign']);
-    assert.ok(listed.result.tools.every(tool => tool.annotations.readOnlyHint));
+    assert.deepEqual(listed.result.tools.map(tool => tool.name).sort(), ['append_page', 'create_page', 'edit_page_block', 'list_pages', 'read_document_blocks', 'read_page', 'replace_page_content', 'search_campaign', 'update_resource']);
+    assert.ok(listed.result.tools.filter(tool => ['list_pages', 'read_page', 'search_campaign', 'read_document_blocks'].includes(tool.name)).every(tool => tool.annotations.readOnlyHint));
     const modern = await result(await rpc({ jsonrpc: '2.0', id: 3, method: 'server/discover',
       params: { _meta: { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {}, 'io.modelcontextprotocol/clientInfo': { name: 'regression', version: '1' } } } }, '2026-07-28'));
     assert.ok(modern.result);
@@ -133,6 +133,39 @@ test(`authenticated Inspector initialization and tools/list support 2025-11-25 a
     assert.notEqual(profile.result.isError, true);
     assert.equal(JSON.parse(profile.result.content[0].text).documents[0].text, 'Biography fixture.');
     assert.equal(paths.length, 6); // fresh SDK: project, resource, document list, blocks
+
+    // A real read-only provider token must fail every write before SDK access.
+    const beforeWrites = paths.length;
+    for (const [name, args] of [
+      ['append_page', { resourceId: 'r', documentId: 'd', expectedVersion: 'v1', content: 'X' }],
+      ['edit_page_block', { resourceId: 'r', documentId: 'd', expectedVersion: 'v1', blockId: 'b', content: 'X' }],
+      ['replace_page_content', { resourceId: 'r', documentId: 'd', expectedVersion: 'v1', content: 'X', mode: 'replace_entire_document' }],
+      ['create_page', { name: 'X' }], ['update_resource', { resourceId: 'r', name: 'X' }],
+    ]) {
+      const denied = await result(await rpc({ jsonrpc: '2.0', id: 40, method: 'tools/call', params: { name, arguments: args } }));
+      assert.equal(denied.result.isError, true);
+      assert.match(denied.result.content[0].text, /mcp:write/);
+    }
+    assert.equal(paths.length, beforeWrites);
+    const writeAuth = await (await send('/test/authorize?write=1')).json();
+    const writeExchange = await send('/oauth/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ grant_type: 'authorization_code', code: writeAuth.code, client_id: writeAuth.clientId,
+        code_verifier: writeAuth.verifier, redirect_uri: 'http://localhost:6274/callback', resource: `${base}/mcp` }).toString() });
+    assert.equal(writeExchange.status, 200);
+    const writeToken = (await writeExchange.json()).access_token;
+    t.mock.method(globalThis, 'fetch', async function (input, init) {
+      const path = new URL(input).pathname;
+      if (path.endsWith('/projects/')) return Response.json({ data: [{ id: 'project-1' }] });
+      assert.equal(init.method, 'POST');
+      assert.match(path, /resources\/$/);
+      return Response.json({ id: 'new-npc', name: 'New NPC', documents: [] });
+    });
+    const createdResponse = await send('/mcp', { method: 'POST', headers: { Host: new URL(base).host, Authorization: `Bearer ${writeToken}`,
+      'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-11-25' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 50, method: 'tools/call', params: { name: 'create_page', arguments: { name: 'New NPC' } } }) });
+    const created = await result(createdResponse);
+    assert.notEqual(created.result.isError, true);
+    assert.equal(JSON.parse(created.result.content[0].text).resource.id, 'new-npc');
 
     const logs = [];
     env.MCP_DEV_DIAGNOSTICS = 'true';

@@ -2,13 +2,29 @@
  * Defense-in-depth policy check used only after OAuthProvider validates the
  * bearer token. Returning null allows the request to reach the MCP handler.
  */
-export function authorizeMcpContext({ auth, githubUserId, allowedGithubUserId, expectedAudience, insufficientScope }) {
-  if (!auth || typeof githubUserId !== 'string') {
+export function authorizeMcpContext(options) {
+  const principal = resolveMcpPrincipal(options);
+  return principal instanceof Response ? principal : null;
+}
+
+/**
+ * Resolve a principal only after identity, allowlist, audience, and scope agree.
+ * Callers pass the OAuthProvider context, never request parameters or headers.
+ * No credentials are read until this function succeeds.
+ */
+export function resolveMcpPrincipal({ auth, githubUserId, identity, allowedGoogleSub, allowedGithubUserId, expectedAudience, insufficientScope }) {
+  if (!auth || (typeof githubUserId !== 'string' && typeof identity !== 'string')) {
     return Response.json({ error: 'Unauthorized' }, { status: 401, headers: { 'Cache-Control': 'no-store' } });
   }
 
   const allowed = normalizeNumericId(allowedGithubUserId);
-  if (!allowed || auth.userId !== allowed || normalizeNumericId(githubUserId) !== allowed) {
+  // Legacy numeric GitHub grants remain valid. Google always has a namespace;
+  // the identity prop and provider-validated userId must agree exactly.
+  const githubAllowed = allowed && auth.userId === allowed && normalizeNumericId(githubUserId) === allowed
+    && (identity === undefined || identity === `github:${allowed}`);
+  const googleAllowed = typeof allowedGoogleSub === 'string' && /^[\x21-\x7e]{1,255}$/.test(allowedGoogleSub)
+    && identity === `google:${allowedGoogleSub}` && auth.userId === `google/${encodeURIComponent(allowedGoogleSub)}` && githubUserId === undefined;
+  if (!githubAllowed && !googleAllowed) {
     return Response.json({ error: 'Forbidden' }, { status: 403, headers: { 'Cache-Control': 'no-store' } });
   }
   if (auth.audience !== expectedAudience) {
@@ -17,7 +33,7 @@ export function authorizeMcpContext({ auth, githubUserId, allowedGithubUserId, e
   if (!Array.isArray(auth.scope) || !auth.scope.includes('mcp:read')) {
     return insufficientScope(auth, ['mcp:read']);
   }
-  return null;
+  return githubAllowed ? 'github' : 'google';
 }
 
 function normalizeNumericId(value) {

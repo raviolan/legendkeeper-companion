@@ -41,7 +41,8 @@ test('all tool failures report safely while public responses remain sanitized', 
   registerLegendKeeperTools({ registerTool(name, _config, handler) { handlers.set(name, handler); } },
     { search: { search: fail }, resources: { list: fail, get: fail } },
     { onReadError: (tool, e) => { reports.push([tool, e.status]); } });
-  for (const [name, handler] of handlers) {
+  for (const name of ['search_campaign', 'list_pages', 'read_page']) {
+    const handler = handlers.get(name);
     const response = await handler({ query: 'test', resourceId: 'test' });
     assert.equal(response.isError, true);
     assert.doesNotMatch(JSON.stringify(response), /private|secret|PermissionError/);
