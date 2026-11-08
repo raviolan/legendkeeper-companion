@@ -345,12 +345,12 @@ test('Google ID token verification rejects wrong issuer, audience, expiry, nonce
   await assert.rejects(verifyGoogleIdToken(unsigned, 'google-client', 'nonce', localGoogleKeys));
 });
 
-for (const provider of ['github', 'google']) {
-  test(`${provider}: real consent, ChatGPT redirect, PKCE, per-client refresh and only read-only MCP tools`, async t => {
+for (const provider of ['github', 'google']) for (const enableWrites of [false, true]) {
+  test(`${provider}: real consent, PKCE and refresh preserve optional write selection ${enableWrites}`, async t => {
     const redirect = 'https://chatgpt.com/connector_platform_oauth_redirect';
     const session = await consentSession(redirect, googleEnv);
     assert.match(session.html, /<option value="google">Google/);
-    const approved = await session.post(session.handle, session.cookie, provider, ['mcp:read', 'offline_access']);
+    const approved = await session.post(session.handle, session.cookie, provider, ['mcp:read', 'offline_access', ...(enableWrites ? ['mcp:write'] : [])]);
     assert.equal(approved.status, 302);
     const upstream = new URL(approved.headers.get('Location'));
     const isGoogle = provider === 'google';
@@ -375,6 +375,10 @@ for (const provider of ['github', 'google']) {
         return Response.json({ id_token: await googleToken(upstream.searchParams.get('nonce')) });
       }
       if (String(input).startsWith('https://www.legendkeeper.com/')) {
+        if (enableWrites && options.method === 'POST') {
+          assert.ok(new URL(input).pathname.endsWith('/resources/'));
+          return Response.json({ id: 'created1', name: 'Test NPC', documents: [] });
+        }
         assert.equal(options.method, 'GET');
         assert.equal(options.headers.authorization, isGoogle ? 'Bearer husband-test-key' : 'Bearer test-key');
         if (new URL(input).pathname.endsWith('/projects/')) return Response.json({ data: [{ id: 'project-1' }], hasMore: false });
@@ -402,6 +406,7 @@ for (const provider of ['github', 'google']) {
     const tokenResponse = await tokenRequest(grant);
     assert.equal(tokenResponse.status, 200);
     const token = await tokenResponse.json();
+    assert.equal(token.scope.split(' ').includes('mcp:write'), enableWrites);
     assert.ok(token.refresh_token);
     const anotherClient = await consentSession(redirect, googleEnv);
     const refresh = { grant_type: 'refresh_token', refresh_token: token.refresh_token,
@@ -410,6 +415,7 @@ for (const provider of ['github', 'google']) {
     const renewedResponse = await tokenRequest(refresh);
     assert.equal(renewedResponse.status, 200);
     const renewed = await renewedResponse.json();
+    assert.equal(renewed.scope.split(' ').includes('mcp:write'), enableWrites);
     assert.ok(renewed.refresh_token);
     assert.notEqual(renewed.refresh_token, token.refresh_token);
     const rpc = async (method, params = {}) => {
@@ -428,9 +434,13 @@ for (const provider of ['github', 'google']) {
     assert.notEqual(read.result.isError, true);
     assert.equal(JSON.parse(read.result.content[0].text).data[0].id, 'page-1');
     const beforeWrite = upstreamCalls;
-    const write = await rpc('tools/call', { name: 'write_page', arguments: {} });
-    assert.ok(write.error || write.result?.isError);
-    assert.equal(upstreamCalls, beforeWrite);
+    const write = await rpc('tools/call', { name: 'create_page', arguments: { name: 'Test NPC' } });
+    assert.equal(write.result.isError === true, !enableWrites);
+    if (enableWrites) assert.equal(JSON.parse(write.result.content[0].text).resource.id, 'created1');
+    else {
+      assert.match(write.result.content[0].text, /mcp:write/);
+      assert.equal(upstreamCalls, beforeWrite);
+    }
     await Promise.all([...session.pending, ...anotherClient.pending]);
   });
 }
@@ -712,9 +722,7 @@ test('write consent is explicit, optional and described separately from reads', 
       } });
     const body = await response.text();
     assert.match(body, /value="mcp:read" checked required/);
-    if (requested.includes('mcp:write')) {
-      assert.match(body, /value="mcp:write">/);
-      assert.match(body, /Create pages and edit or replace content and metadata/);
-    } else assert.doesNotMatch(body, /value="mcp:write"/);
+    assert.match(body, /value="mcp:write">/);
+    assert.match(body, /Create pages and edit or replace content and metadata/);
   }
 });

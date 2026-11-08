@@ -259,7 +259,9 @@ function renderConsent(details: ConsentDescription, handle: string, googleEnable
   const loopbackWarning = details.redirectIsLoopback
     ? '<p><strong>This sends access to an app on your computer.</strong> Continue only if you just started signing in from it.</p>'
     : '';
-  const availableScopes = [...new Set([...details.scope, 'mcp:read'])]
+  // approveConsent supports explicitly user-selected scopes beyond the client request.
+  // Always offer optional write access; never select or grant it automatically.
+  const availableScopes = [...new Set([...details.scope, 'mcp:read', 'mcp:write'])]
     .filter((scope) => GRANTABLE_SCOPES.has(scope));
   const scopeRows = availableScopes.map((scope) => {
     const checked = scope === 'mcp:read' ? ' checked required' : '';
